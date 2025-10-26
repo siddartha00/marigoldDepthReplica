@@ -1,4 +1,7 @@
+data
 virtual_kitti_2
-.__pycache__
+__pycache__
 *.pyc
 ml-hypersim
+.pytest_cache
+.DS_Store
