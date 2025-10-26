@@ -26,18 +26,45 @@ class Csv2ImageDepthDataset:
             raise NotImplementedError("Slicing is not supported.")
         if idx < 0 or idx >= len(self.data):
             raise IndexError("Index out of range.")
+
         sample = self.data[idx]
         rgb_path = os.path.join(self.root_dir, sample['rgb_file'])
         depth_path = os.path.join(self.root_dir, sample['depth_file'])
+
+        # Load PIL images
         image = self.load_image(rgb_path)
-        normalized_image = self.normalize_image(image)
-        normalized_image = torch.from_numpy(normalized_image).permute(2, 0, 1)
         depth = self.load_depth(depth_path)
-        normalized_depth = self.normalize_depth(depth)
-        normalized_depth = torch.from_numpy(normalized_depth).permute(2, 0, 1)
+
         if self.transform:
-            image = self.transform(normalized_image)
-            depth = self.transform(normalized_depth)
+            # Apply transforms (Resize, RandomHorizontalFlip, ToTensor)
+            # After ToTensor, images are in [0, 1] range with shape (C, H, W)
+            image = self.transform(image)
+            depth = self.transform(depth)
+
+            # Normalize image from [0, 1] to [-1, 1]
+            image = image * 2.0 - 1.0
+
+            # Normalize depth using percentile-based method
+            # depth is a tensor now, convert to numpy for percentile calculation
+            depth_np = depth.squeeze().numpy() if depth.dim() == 3 else depth.numpy()
+            d2, d98 = np.percentile(depth_np, (2, 98))
+
+            # Normalize depth to [-1, 1]
+            depth = ((depth - d2) / (d98 - d2 + 1e-8) - 0.5) * 2.0
+
+            # Ensure depth has 3 channels
+            if depth.shape[0] == 1:
+                depth = depth.repeat(3, 1, 1)
+            elif depth.dim() == 2:
+                depth = depth.unsqueeze(0).repeat(3, 1, 1)
+        else:
+            # No transform: normalize PIL images directly
+            normalized_image = self.normalize_image(image)
+            normalized_depth = self.normalize_depth(depth)
+
+            image = torch.from_numpy(normalized_image).permute(2, 0, 1).float()
+            depth = torch.from_numpy(normalized_depth).permute(2, 0, 1).float()
+
         return image, depth
 
     def load_image(self, path):
@@ -47,16 +74,18 @@ class Csv2ImageDepthDataset:
         return Image.open(path)
 
     def normalize_depth(self, depth):
-        depth_array = np.array(depth).astype('float16')
+        """Normalize depth PIL image to [-1, 1] using percentile-based scaling"""
+        depth_array = np.array(depth).astype('float32')
         d2, d98 = np.percentile(depth_array, (2, 98))
-        normalized_depth_array = ((depth_array - d2) / (d98 - d2) - 0.5) * 2
-        normalized_depth_array = np.stack([normalized_depth_array]*3, axis=-1)
+        normalized_depth_array = ((depth_array - d2) / (d98 - d2 + 1e-8) - 0.5) * 2
+        # Replicate to 3 channels
+        normalized_depth_array = np.stack([normalized_depth_array] * 3, axis=-1)
         return normalized_depth_array
 
     def normalize_image(self, image):
-        image_array = np.array(image).astype('float16') / 255.0*2.0 - 1.0
-        normalized_image_array = image_array.astype('float16')
-        return normalized_image_array
+        """Normalize image PIL to [-1, 1]"""
+        image_array = np.array(image).astype('float32') / 255.0 * 2.0 - 1.0
+        return image_array
 
 
 class KttiDepthDataModule(LightningDataModule):
@@ -67,50 +96,61 @@ class KttiDepthDataModule(LightningDataModule):
         self.root_dir = os.path.abspath(
             os.path.join(os.path.abspath(__file__), "../..")
         )
-        self.data_dir = os.path.join(self.root_dir, 'data')
+        self.data_dir = os.path.join(self.root_dir, 'data', 'virtual_kitti_2')
         self.csv_dir = os.path.join(self.data_dir, 'splits')
 
     def train_dataloader(self):
         train_csv_path = os.path.join(self.csv_dir, 'train.csv')
-        self.train_dataset = Csv2ImageDepthDataset(
-            csv_file=train_csv_path,
-            root_dir=self.root_dir
-        )
-        self.train_transform = transforms.Compose([
+        train_transform = transforms.Compose([
             transforms.Resize((512, 512)),
+            transforms.RandomHorizontalFlip(p=0.3),
             transforms.ToTensor(),
-            transforms.random.HorizontalFlip(),
         ])
-        return DataLoader(self.train_dataset,
-                          batch_size=self.batch_size,
-                          shuffle=True,
-                          num_workers=self.num_workers,
-                          transform=self.train_transform)
+        train_dataset = Csv2ImageDepthDataset(
+            csv_file=train_csv_path,
+            root_dir=self.root_dir,
+            transform=train_transform
+        )
+        return DataLoader(
+            train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers
+        )
 
     def val_dataloader(self):
         val_csv_path = os.path.join(self.csv_dir, 'val.csv')
-        self.val_dataset = Csv2ImageDepthDataset(
-            csv_file=val_csv_path,
-            root_dir=self.root_dir
-        )
-        self.val_transform = transforms.Compose([
+        # Define transform BEFORE using it
+        val_transform = transforms.Compose([
             transforms.Resize((512, 512)),
-            transforms.ToTensor(),
-            transforms.random.HorizontalFlip(),
+            transforms.ToTensor(),  # No random flips for validation
         ])
-        return DataLoader(self.val_dataset,
-                          batch_size=self.batch_size,
-                          shuffle=True,
-                          num_workers=self.num_workers,
-                          transform=self.val_transform)
+        val_dataset = Csv2ImageDepthDataset(
+            csv_file=val_csv_path,
+            root_dir=self.root_dir,
+            transform=val_transform
+        )
+        return DataLoader(
+            val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,  # Don't shuffle validation data
+            num_workers=self.num_workers
+        )
 
     def test_dataloader(self):
         test_csv_path = os.path.join(self.csv_dir, 'test.csv')
-        self.test_dataset = Csv2ImageDepthDataset(
+        test_transform = transforms.Compose([
+            transforms.Resize((512, 512)),
+            transforms.ToTensor(),
+        ])
+        test_dataset = Csv2ImageDepthDataset(
             csv_file=test_csv_path,
-            root_dir=self.root_dir
+            root_dir=self.root_dir,
+            transform=test_transform
         )
-        return DataLoader(self.test_dataset,
-                          batch_size=self.batch_size,
-                          shuffle=False,
-                          num_workers=self.num_workers)
+        return DataLoader(
+            test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers
+        )
