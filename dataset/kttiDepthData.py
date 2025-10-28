@@ -89,7 +89,7 @@ class Csv2ImageDepthDataset:
 
 
 class KttiDepthDataModule(LightningDataModule):
-    def __init__(self, batch_size=8, num_workers=4):
+    def __init__(self, batch_size=4, num_workers=16):
         super().__init__()
         self.batch_size = batch_size
         self.num_workers = num_workers
