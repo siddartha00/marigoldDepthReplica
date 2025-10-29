@@ -1,9 +1,10 @@
 from .latentDecoder import LatentDecoder
 from .latentEncoder import LatentEncoder
-from .modifiedUnet import ModifiedUNet
+from .DiTNoisePred import DitNoisePred
 from .noise import DDIMNoiseScheduler
 import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
 
 
 class MarigoldDepth(pl.LightningModule):
@@ -12,14 +13,19 @@ class MarigoldDepth(pl.LightningModule):
         pretrained_model_path: str = "stabilityai/stable-diffusion-2-base",
         device_type: str = "cuda",
         learning_rate: float = 1e-4,
-        number_of_training_steps: int = 100000
+        number_of_training_steps: int = 100000,
+        image_size: int = 512,
+        vae_downsample: int = 8,
+        latent_channels: int = 4
     ):
         super().__init__()
         self.save_hyperparameters()
         self.device_type = device_type
         self.learning_rate = learning_rate
         self.number_of_training_steps = number_of_training_steps
+        self.latent_channels = latent_channels
 
+        # Encoders and decoder
         self.latent_encoder = LatentEncoder(
             pretrained_model_path=pretrained_model_path,
             device=self.device_type
@@ -28,15 +34,27 @@ class MarigoldDepth(pl.LightningModule):
             pretrained_model_path=pretrained_model_path,
             device=self.device_type
         )
-        self.modified_unet = ModifiedUNet(
-            pretrained_model_path=pretrained_model_path,
-            device=self.device_type
-        )
+
+        # Noise predictor (DiT)
+        self.noise_pred = DitNoisePred(
+            in_channels=latent_channels * 2,  # depth + image
+            out_channels=latent_channels,
+            sample_size=image_size // vae_downsample,
+            num_layers=2,
+            embed_dim=128,
+            num_heads=4
+        ).to(self.device_type)
+
+        # DDIM Noise Scheduler
         self.scheduler = DDIMNoiseScheduler(
             pretrained_model_path=pretrained_model_path
         )
 
-    def training_step(self, batch, batch_idx, *args, **kwargs):
+    @property
+    def num_train_timesteps(self):
+        return self.scheduler.num_train_timesteps
+
+    def training_step(self, batch, batch_idx):
         image, depth = batch
         batch_size = image.size(0)
 
@@ -44,12 +62,12 @@ class MarigoldDepth(pl.LightningModule):
         image_latents = self.latent_encoder(image)
         depth_latents = self.latent_encoder(depth)
 
-        # Sample timesteps
+        # Sample random timesteps
         timesteps = torch.randint(
             0,
-            self.scheduler.num_train_timesteps,
+            self.num_train_timesteps,
             (batch_size,),
-            device=self.device
+            device=image.device
         ).long()
 
         # Add noise
@@ -63,22 +81,19 @@ class MarigoldDepth(pl.LightningModule):
         # Concatenate [depth, image]
         latent_input = torch.cat([noisy_depth_latents, image_latents], dim=1)
 
-        # Empty context (SD v2 uses 1024)
-        empty_context = torch.zeros(batch_size, 77, 1024, device=self.device)
-
         # Predict noise
-        noise_pred = self.modified_unet(
+        noise_pred = self.noise_pred(
             latent_input,
-            timesteps,
-            empty_context
+            timestep=timesteps,
+            encoder_hidden_states=None
         )
 
         # Compute loss
-        loss = torch.nn.functional.mse_loss(noise_pred, noise)
+        loss = F.mse_loss(noise_pred, noise)
         self.log("train/loss", loss, prog_bar=True)
         return loss
 
-    def validation_step(self, batch, batch_idx, *args, **kwargs):
+    def validation_step(self, batch, batch_idx):
         image, depth = batch
         batch_size = image.size(0)
 
@@ -87,9 +102,9 @@ class MarigoldDepth(pl.LightningModule):
 
         timesteps = torch.randint(
             0,
-            self.scheduler.num_train_timesteps,
+            self.num_train_timesteps,
             (batch_size,),
-            device=self.device
+            device=image.device
         ).long()
 
         noise = torch.randn_like(depth_latents)
@@ -100,28 +115,23 @@ class MarigoldDepth(pl.LightningModule):
         )
 
         latent_input = torch.cat([noisy_depth_latents, image_latents], dim=1)
-        empty_context = torch.zeros(batch_size, 77, 1024, device=self.device)
 
-        noise_pred = self.modified_unet(
+        noise_pred = self.noise_pred(
             latent_input,
-            timesteps,
-            empty_context
+            timestep=timesteps,
+            encoder_hidden_states=None
         )
 
-        loss = torch.nn.functional.mse_loss(noise_pred, noise)
+        loss = F.mse_loss(noise_pred, noise)
         self.log("val/loss", loss, prog_bar=True)
         return loss
 
     def forward(self, x):
         return self.predict_depth(x)
 
-    def predict_step(self, batch, batch_idx, *args, **kwargs):
-        if isinstance(batch, (list, tuple)):
-            images = batch[0]
-        else:
-            images = batch
-        depth_predictions = self.predict_depth(images)
-        return depth_predictions
+    def predict_step(self, batch, batch_idx):
+        images = batch[0] if isinstance(batch, (list, tuple)) else batch
+        return self.predict_depth(images)
 
     def predict_depth(
         self,
@@ -130,43 +140,35 @@ class MarigoldDepth(pl.LightningModule):
         ensemble_size: int = 10
     ):
         """Predict depth using iterative denoising"""
-        self.modified_unet._unet.eval()
-
         with torch.no_grad():
             batch_size = image.size(0)
-            # Get device from input image
             device = image.device
-
             image_latents = self.latent_encoder(image)
             predictions = []
 
+            # Set timesteps for scheduler
+            self.scheduler.scheduler.set_timesteps(num_inference_steps)
+
             for _ in range(ensemble_size):
-                # Initialize random noise on correct device
                 depth_latent = torch.randn(
-                    batch_size, 4,
+                    batch_size, self.latent_channels,
                     image_latents.shape[2],
                     image_latents.shape[3],
                     device=device,
                     dtype=image.dtype
                 )
 
-                # Set timesteps
-                self.scheduler.scheduler.set_timesteps(num_inference_steps)
-
-                # Denoising loop
                 for t in self.scheduler.scheduler.timesteps:
+                    t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
+
                     # Concatenate [depth, image]
                     latent_input = torch.cat([depth_latent, image_latents], dim=1)
-                    empty_context = torch.zeros(
-                        batch_size, 77, 1024,
-                        device=device
-                    )
 
                     # Predict noise
-                    noise_pred = self.modified_unet(
+                    noise_pred = self.noise_pred(
                         latent_input,
-                        t.unsqueeze(0).repeat(batch_size).to(device),
-                        empty_context
+                        timestep=t_batch,
+                        encoder_hidden_states=None
                     )
 
                     # Denoise step
@@ -178,12 +180,10 @@ class MarigoldDepth(pl.LightningModule):
 
                 # Decode
                 depth_image = self.latent_decoder(depth_latent)
-
-                # Average channels to get single-channel depth
                 depth_map = depth_image.mean(dim=1, keepdim=True)
                 predictions.append(depth_map)
 
-            # Ensemble
+            # Ensemble predictions
             if ensemble_size > 1:
                 final_depth = torch.median(torch.stack(predictions), dim=0).values
             else:
@@ -193,10 +193,10 @@ class MarigoldDepth(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
-            self.modified_unet._unet.parameters(),
+            self.noise_pred.parameters(),
             lr=self.learning_rate,
             betas=(0.9, 0.999),
-            weight_decay=1e-3  # optional tweak
+            weight_decay=1e-3
         )
 
         reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
