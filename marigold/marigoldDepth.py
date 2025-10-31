@@ -36,14 +36,7 @@ class MarigoldDepth(pl.LightningModule):
         )
 
         # Noise predictor (DiT)
-        self.noise_pred = DitNoisePred(
-            in_channels=latent_channels * 2,  # depth + image
-            out_channels=latent_channels,
-            sample_size=image_size // vae_downsample,
-            num_layers=2,
-            embed_dim=128,
-            num_heads=4
-        ).to(self.device_type)
+        self.noise_pred = DitNoisePred().to(self.device_type)
 
         # DDIM Noise Scheduler
         self.scheduler = DDIMNoiseScheduler(
