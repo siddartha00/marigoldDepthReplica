@@ -196,10 +196,10 @@ class MarigoldDepth(pl.LightningModule):
             optimizer,
             mode="min",
             factor=0.5,
-            patience=3,
+            patience=4,
             threshold=5e-4,
             cooldown=1,
-            min_lr=1e-7,
+            min_lr=8e-7,
         )
 
         scheduler = {
