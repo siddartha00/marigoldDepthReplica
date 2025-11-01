@@ -17,7 +17,7 @@ def parse_args():
     parser.add_argument("--image_size", type=int, default=512, help="H=W transform resize")
     
     # Optim/Train
-    parser.add_argument("--learning_rate", type=float, default=3e-5)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--max_epochs", type=int, default=10)
     parser.add_argument("--accumulate_grad_batches", type=int, default=8, help="Gradient accumulation")
     parser.add_argument("--precision", type=str, default="32", choices=["16", "16-mixed", "32"])
