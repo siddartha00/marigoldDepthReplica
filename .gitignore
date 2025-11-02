@@ -7,3 +7,5 @@ ml-hypersim
 .DS_Store
 logs
 results
+checkpoints
+lightning_logs
