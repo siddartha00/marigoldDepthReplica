@@ -115,7 +115,8 @@ class KttiDepthDataModule(LightningDataModule):
             train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers
+            num_workers=self.num_workers,
+            persistent_workers=True
         )
 
     def val_dataloader(self):
@@ -134,7 +135,8 @@ class KttiDepthDataModule(LightningDataModule):
             val_dataset,
             batch_size=self.batch_size,
             shuffle=False,  # Don't shuffle validation data
-            num_workers=self.num_workers
+            num_workers=self.num_workers,
+            persistent_workers=True
         )
 
     def test_dataloader(self):
