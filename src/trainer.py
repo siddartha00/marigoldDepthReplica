@@ -3,7 +3,7 @@ import argparse
 import torch
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import TensorBoardLogger
 from dataset.kttiDepthData import KttiDepthDataModule
 from marigold.marigoldDepth import MarigoldDepth
 
@@ -12,11 +12,11 @@ def parse_args():
     parser = argparse.ArgumentParser("Train Marigold Depth")
     # Data
     parser.add_argument("--batch_size", type=int, default=4, help="Per-step batch size")
-    parser.add_argument("--num_workers", type=int, default=12, help="DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers")
     parser.add_argument("--image_size", type=int, default=512, help="H=W transform resize")
     # Optim/Train
     parser.add_argument("--learning_rate", type=float, default=3e-5)
-    parser.add_argument("--max_epochs", type=int, default=10)
+    parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--accumulate_grad_batches", type=int, default=8, help="Gradient accumulation")
     parser.add_argument("--precision", type=str, default="32", choices=["16", "16-mixed", "32"])
     parser.add_argument("--gradient_clip_val", type=float, default=1.0)
@@ -77,7 +77,7 @@ def build_trainer(
         auto_insert_metric_name=False,
     )
     lr_cb = LearningRateMonitor(logging_interval="step")
-    logger = CSVLogger(save_dir=log_dir, name="marigold_depth")
+    logger = TensorBoardLogger(save_dir=log_dir, name="marigold_depth")
 
     trainer = Trainer(
         max_epochs=max_epochs,
