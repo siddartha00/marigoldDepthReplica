@@ -45,10 +45,8 @@ class LatentDecoder(nn.Module):
     def decode_to_depth(self, latents):
         """
         Decode latents and convert to single-channel depth map
-
         Args:
             latents: Latent codes, shape (B, 4, h, w)
-
         Returns:
             depth: Depth map, shape (B, 1, H, W)
         """
